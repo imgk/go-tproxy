@@ -8,14 +8,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // Listener describes a TCP Listener
 // with the Linux IP_TRANSPARENT option defined
 // on the listening socket
-type Listener struct {
-	Base net.Listener
+type TCPListener struct {
+	*net.TCPListener
 }
 
 // Accept waits for and returns
@@ -23,56 +24,58 @@ type Listener struct {
 //
 // This command wraps the AcceptTProxy
 // method of the Listener
-func (listener *Listener) Accept() (net.Conn, error) {
-	return listener.AcceptTProxy()
+func (ln TCPListener) Accept() (net.Conn, error) {
+	return ln.AcceptTProxy()
 }
 
 // AcceptTProxy will accept a TCP connection
 // and wrap it to a TProxy connection to provide
 // TProxy functionality
-func (listener *Listener) AcceptTProxy() (*Conn, error) {
-	tcpConn, err := listener.Base.(*net.TCPListener).AcceptTCP()
+func (ln TCPListener) AcceptTProxy() (Conn, error) {
+	tcpConn, err := ln.TCPListener.AcceptTCP()
 	if err != nil {
-		return nil, err
+		return Conn{}, err
 	}
 
-	return &Conn{TCPConn: tcpConn}, nil
+	return Conn{TCPConn: tcpConn}, nil
 }
 
 // Addr returns the network address
 // the listener is accepting connections
 // from
-func (listener *Listener) Addr() net.Addr {
-	return listener.Base.Addr()
+func (ln TCPListener) Addr() net.Addr {
+	return ln.TCPListener.Addr()
 }
 
 // Close will close the listener from accepting
 // any more connections. Any blocked connections
 // will unblock and close
-func (listener *Listener) Close() error {
-	return listener.Base.Close()
+func (ln TCPListener) Close() error {
+	return ln.TCPListener.Close()
 }
 
 // ListenTCP will construct a new TCP listener
 // socket with the Linux IP_TRANSPARENT option
 // set on the underlying socket
-func ListenTCP(network string, laddr *net.TCPAddr) (net.Listener, error) {
+func ListenTCP(network string, laddr *net.TCPAddr) (TCPListener, error) {
+	ln := TCPListener{}
 	listener, err := net.ListenTCP(network, laddr)
 	if err != nil {
-		return nil, err
+		return ln, err
 	}
 
 	fileDescriptorSource, err := listener.File()
 	if err != nil {
-		return nil, &net.OpError{Op: "listen", Net: network, Source: nil, Addr: laddr, Err: fmt.Errorf("get file descriptor: %s", err)}
+		return ln, &net.OpError{Op: "listen", Net: network, Source: nil, Addr: laddr, Err: fmt.Errorf("get file descriptor: %s", err)}
 	}
 	defer fileDescriptorSource.Close()
 
-	if err = syscall.SetsockoptInt(int(fileDescriptorSource.Fd()), syscall.SOL_IP, syscall.IP_TRANSPARENT, 1); err != nil {
-		return nil, &net.OpError{Op: "listen", Net: network, Source: nil, Addr: laddr, Err: fmt.Errorf("set socket option: IP_TRANSPARENT: %s", err)}
+	if err = unix.SetsockoptInt(int(fileDescriptorSource.Fd()), unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
+		return ln, &net.OpError{Op: "listen", Net: network, Source: nil, Addr: laddr, Err: fmt.Errorf("set socket option: IP_TRANSPARENT: %s", err)}
 	}
 
-	return &Listener{listener}, nil
+	ln.TCPListener = listener
+	return ln, nil
 }
 
 // Conn describes a connection
@@ -97,7 +100,7 @@ type Conn struct {
 // the connection will originate from an IP address and port
 // assigned by the Linux kernel that is owned by the
 // operating system
-func (conn *Conn) DialOriginalDestination(dontAssumeRemote bool) (*net.TCPConn, error) {
+func (conn Conn) DialOriginalDestination(dontAssumeRemote bool) (*net.TCPConn, error) {
 	remoteSocketAddress, err := tcpAddrToSocketAddr(conn.LocalAddr().(*net.TCPAddr))
 	if err != nil {
 		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("build destination socket address: %s", err)}
@@ -108,35 +111,35 @@ func (conn *Conn) DialOriginalDestination(dontAssumeRemote bool) (*net.TCPConn, 
 		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("build local socket address: %s", err)}
 	}
 
-	fileDescriptor, err := syscall.Socket(tcpAddrFamily("tcp", conn.LocalAddr().(*net.TCPAddr), conn.RemoteAddr().(*net.TCPAddr)), syscall.SOCK_STREAM, syscall.IPPROTO_TCP)
+	fileDescriptor, err := unix.Socket(tcpAddrFamily("tcp", conn.LocalAddr().(*net.TCPAddr), conn.RemoteAddr().(*net.TCPAddr)), unix.SOCK_STREAM, unix.IPPROTO_TCP)
 	if err != nil {
 		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("socket open: %s", err)}
 	}
 
-	if err = syscall.SetsockoptInt(fileDescriptor, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
-		syscall.Close(fileDescriptor)
+	if err = unix.SetsockoptInt(fileDescriptor, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+		unix.Close(fileDescriptor)
 		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: SO_REUSEADDR: %s", err)}
 	}
 
-	if err = syscall.SetsockoptInt(fileDescriptor, syscall.SOL_IP, syscall.IP_TRANSPARENT, 1); err != nil {
-		syscall.Close(fileDescriptor)
+	if err = unix.SetsockoptInt(fileDescriptor, unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
+		unix.Close(fileDescriptor)
 		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: IP_TRANSPARENT: %s", err)}
 	}
 
-	if err = syscall.SetNonblock(fileDescriptor, true); err != nil {
-		syscall.Close(fileDescriptor)
+	if err = unix.SetNonblock(fileDescriptor, true); err != nil {
+		unix.Close(fileDescriptor)
 		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: SO_NONBLOCK: %s", err)}
 	}
 
 	if !dontAssumeRemote {
-		if err = syscall.Bind(fileDescriptor, localSocketAddress); err != nil {
-			syscall.Close(fileDescriptor)
+		if err = unix.Bind(fileDescriptor, localSocketAddress); err != nil {
+			unix.Close(fileDescriptor)
 			return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("socket bind: %s", err)}
 		}
 	}
 
-	if err = syscall.Connect(fileDescriptor, remoteSocketAddress); err != nil && !strings.Contains(err.Error(), "operation now in progress") {
-		syscall.Close(fileDescriptor)
+	if err = unix.Connect(fileDescriptor, remoteSocketAddress); err != nil && !strings.Contains(err.Error(), "operation now in progress") {
+		unix.Close(fileDescriptor)
 		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("socket connect: %s", err)}
 	}
 
@@ -145,7 +148,7 @@ func (conn *Conn) DialOriginalDestination(dontAssumeRemote bool) (*net.TCPConn, 
 
 	remoteConn, err := net.FileConn(fdFile)
 	if err != nil {
-		syscall.Close(fileDescriptor)
+		unix.Close(fileDescriptor)
 		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("convert file descriptor to connection: %s", err)}
 	}
 
@@ -155,13 +158,13 @@ func (conn *Conn) DialOriginalDestination(dontAssumeRemote bool) (*net.TCPConn, 
 // tcpAddToSockerAddr will convert a TCPAddr
 // into a Sockaddr that may be used when
 // connecting and binding sockets
-func tcpAddrToSocketAddr(addr *net.TCPAddr) (syscall.Sockaddr, error) {
+func tcpAddrToSocketAddr(addr *net.TCPAddr) (unix.Sockaddr, error) {
 	switch {
 	case addr.IP.To4() != nil:
 		ip := [4]byte{}
 		copy(ip[:], addr.IP.To4())
 
-		return &syscall.SockaddrInet4{Addr: ip, Port: addr.Port}, nil
+		return &unix.SockaddrInet4{Addr: ip, Port: addr.Port}, nil
 
 	default:
 		ip := [16]byte{}
@@ -172,7 +175,7 @@ func tcpAddrToSocketAddr(addr *net.TCPAddr) (syscall.Sockaddr, error) {
 			return nil, err
 		}
 
-		return &syscall.SockaddrInet6{Addr: ip, Port: addr.Port, ZoneId: uint32(zoneID)}, nil
+		return &unix.SockaddrInet6{Addr: ip, Port: addr.Port, ZoneId: uint32(zoneID)}, nil
 	}
 }
 
@@ -182,14 +185,14 @@ func tcpAddrToSocketAddr(addr *net.TCPAddr) (syscall.Sockaddr, error) {
 func tcpAddrFamily(net string, laddr, raddr *net.TCPAddr) int {
 	switch net[len(net)-1] {
 	case '4':
-		return syscall.AF_INET
+		return unix.AF_INET
 	case '6':
-		return syscall.AF_INET6
+		return unix.AF_INET6
 	}
 
 	if (laddr == nil || laddr.IP.To4() != nil) &&
 		(raddr == nil || laddr.IP.To4() != nil) {
-		return syscall.AF_INET
+		return unix.AF_INET
 	}
-	return syscall.AF_INET6
+	return unix.AF_INET6
 }

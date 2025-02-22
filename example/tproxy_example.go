@@ -9,19 +9,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LiamHaworth/go-tproxy"
+	"github.com/imgk/go-tproxy"
 )
 
 var (
 	// tcpListener represents the TCP
 	// listening socket that will receive
 	// TCP connections from TProxy
-	tcpListener net.Listener
+	tcpListener tproxy.TCPListener
 
 	// udpListener represents tje UDP
 	// listening socket that will receive
 	// UDP packets from TProxy
-	udpListener *net.UDPConn
+	udpListener tproxy.PacketConn
 )
 
 // main will initialize the TProxy
@@ -63,7 +63,7 @@ func main() {
 func listenUDP() {
 	for {
 		buff := make([]byte, 1024)
-		n, srcAddr, dstAddr, err := tproxy.ReadFromUDP(udpListener, buff)
+		n, srcAddr, dstAddr, err := udpListener.ReadFromUDPTProxy(buff)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
 				log.Printf("Temporary error while reading data: %s", netErr)
@@ -159,12 +159,12 @@ func handleUDPConn(data []byte, srcAddr, dstAddr *net.UDPAddr) {
 func handleTCPConn(conn net.Conn) {
 	log.Printf("Accepting TCP connection from %s with destination of %s", conn.RemoteAddr().String(), conn.LocalAddr().String())
 	defer conn.Close()
-	
+
 	remoteConn, err := conn.(*tproxy.Conn).DialOriginalDestination(false)
 	if err != nil {
 		log.Printf("Failed to connect to original destination [%s]: %s", conn.LocalAddr().String(), err)
 		return
-	} 
+	}
 	defer remoteConn.Close()
 
 	var streamWait sync.WaitGroup
