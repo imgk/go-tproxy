@@ -100,47 +100,47 @@ type Conn struct {
 // the connection will originate from an IP address and port
 // assigned by the Linux kernel that is owned by the
 // operating system
-func (conn Conn) DialOriginalDestination(dontAssumeRemote bool) (*net.TCPConn, error) {
+func (conn Conn) DialOriginalDestination(dontAssumeRemote bool) (Conn, error) {
 	remoteSocketAddress, err := tcpAddrToSocketAddr(conn.LocalAddr().(*net.TCPAddr))
 	if err != nil {
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("build destination socket address: %s", err)}
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("build destination socket address: %s", err)}
 	}
 
 	localSocketAddress, err := tcpAddrToSocketAddr(conn.RemoteAddr().(*net.TCPAddr))
 	if err != nil {
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("build local socket address: %s", err)}
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("build local socket address: %s", err)}
 	}
 
 	fileDescriptor, err := unix.Socket(tcpAddrFamily("tcp", conn.LocalAddr().(*net.TCPAddr), conn.RemoteAddr().(*net.TCPAddr)), unix.SOCK_STREAM, unix.IPPROTO_TCP)
 	if err != nil {
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("socket open: %s", err)}
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("socket open: %s", err)}
 	}
 
 	if err = unix.SetsockoptInt(fileDescriptor, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
 		unix.Close(fileDescriptor)
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: SO_REUSEADDR: %s", err)}
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: SO_REUSEADDR: %s", err)}
 	}
 
 	if err = unix.SetsockoptInt(fileDescriptor, unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
 		unix.Close(fileDescriptor)
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: IP_TRANSPARENT: %s", err)}
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: IP_TRANSPARENT: %s", err)}
 	}
 
 	if err = unix.SetNonblock(fileDescriptor, true); err != nil {
 		unix.Close(fileDescriptor)
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: SO_NONBLOCK: %s", err)}
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: SO_NONBLOCK: %s", err)}
 	}
 
 	if !dontAssumeRemote {
 		if err = unix.Bind(fileDescriptor, localSocketAddress); err != nil {
 			unix.Close(fileDescriptor)
-			return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("socket bind: %s", err)}
+			return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("socket bind: %s", err)}
 		}
 	}
 
 	if err = unix.Connect(fileDescriptor, remoteSocketAddress); err != nil && !strings.Contains(err.Error(), "operation now in progress") {
 		unix.Close(fileDescriptor)
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("socket connect: %s", err)}
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("socket connect: %s", err)}
 	}
 
 	fdFile := os.NewFile(uintptr(fileDescriptor), fmt.Sprintf("net-tcp-dial-%s", conn.LocalAddr().String()))
@@ -149,10 +149,68 @@ func (conn Conn) DialOriginalDestination(dontAssumeRemote bool) (*net.TCPConn, e
 	remoteConn, err := net.FileConn(fdFile)
 	if err != nil {
 		unix.Close(fileDescriptor)
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("convert file descriptor to connection: %s", err)}
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("convert file descriptor to connection: %s", err)}
 	}
 
-	return remoteConn.(*net.TCPConn), nil
+	return Conn{remoteConn.(*net.TCPConn)}, nil
+}
+
+// DialTCP creates transparent connection
+// network must be "tcp", "tcp4" or "tcp6"
+// if laddr is nil, use dontAssumeRemote as false
+func DialTCP(network string, laddr, raddr *net.TCPAddr) (Conn, error) {
+	remoteSocketAddress, err := tcpAddrToSocketAddr(raddr)
+	if err != nil {
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("build destination socket address: %s", err)}
+	}
+
+	fileDescriptor, err := unix.Socket(tcpAddrFamily("tcp", raddr, laddr), unix.SOCK_STREAM, unix.IPPROTO_TCP)
+	if err != nil {
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("socket open: %s", err)}
+	}
+
+	if err = unix.SetsockoptInt(fileDescriptor, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+		unix.Close(fileDescriptor)
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: SO_REUSEADDR: %s", err)}
+	}
+
+	if err = unix.SetsockoptInt(fileDescriptor, unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
+		unix.Close(fileDescriptor)
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: IP_TRANSPARENT: %s", err)}
+	}
+
+	if err = unix.SetNonblock(fileDescriptor, true); err != nil {
+		unix.Close(fileDescriptor)
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: SO_NONBLOCK: %s", err)}
+	}
+
+	if laddr != nil {
+		localSocketAddress, err := tcpAddrToSocketAddr(laddr)
+		if err != nil {
+			return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("build local socket address: %s", err)}
+		}
+
+		if err = unix.Bind(fileDescriptor, localSocketAddress); err != nil {
+			unix.Close(fileDescriptor)
+			return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("socket bind: %s", err)}
+		}
+	}
+
+	if err = unix.Connect(fileDescriptor, remoteSocketAddress); err != nil && !strings.Contains(err.Error(), "operation now in progress") {
+		unix.Close(fileDescriptor)
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("socket connect: %s", err)}
+	}
+
+	fdFile := os.NewFile(uintptr(fileDescriptor), fmt.Sprintf("net-tcp-dial-%s", raddr.String()))
+	defer fdFile.Close()
+
+	remoteConn, err := net.FileConn(fdFile)
+	if err != nil {
+		unix.Close(fileDescriptor)
+		return Conn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("convert file descriptor to connection: %s", err)}
+	}
+
+	return Conn{remoteConn.(*net.TCPConn)}, nil
 }
 
 // tcpAddToSockerAddr will convert a TCPAddr

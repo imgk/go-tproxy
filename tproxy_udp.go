@@ -206,53 +206,53 @@ func (conn PacketConn) ReadFromUDPAddrPortTProxy(b []byte) (int, netip.AddrPort,
 // DialUDP connects to the remote address raddr on the network net,
 // which must be "udp", "udp4", or "udp6".  If laddr is not nil, it is
 // used as the local address for the connection.
-func DialUDP(network string, laddr *net.UDPAddr, raddr *net.UDPAddr) (*net.UDPConn, error) {
+func DialUDP(network string, laddr *net.UDPAddr, raddr *net.UDPAddr) (PacketConn, error) {
 	remoteSocketAddress, err := udpAddrToSocketAddr(raddr)
 	if err != nil {
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("build destination socket address: %s - %+v", err, raddr)}
+		return PacketConn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("build destination socket address: %s - %+v", err, raddr)}
 	}
 
 	ipv6 := laddr.IP.To4() == nil
 
 	localSocketAddress, err := udpAddrToSocketAddr(laddr)
 	if err != nil {
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("build local socket address: %s", err)}
+		return PacketConn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("build local socket address: %s", err)}
 	}
 
 	fileDescriptor, err := unix.Socket(udpAddrFamily(network, laddr, raddr), unix.SOCK_DGRAM, 0)
 	if err != nil {
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("socket open: %s", err)}
+		return PacketConn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("socket open: %s", err)}
 	}
 
 	if err = unix.SetsockoptInt(fileDescriptor, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
 		unix.Close(fileDescriptor)
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: SO_REUSEADDR: %s", err)}
+		return PacketConn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: SO_REUSEADDR: %s", err)}
 	}
 
 	if ipv6 {
 
 		if err = unix.SetsockoptInt(fileDescriptor, unix.SOL_IPV6, unix.IPV6_TRANSPARENT, 1); err != nil {
 			unix.Close(fileDescriptor)
-			return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: IPV6_TRANSPARENT: %s", err)}
+			return PacketConn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: IPV6_TRANSPARENT: %s", err)}
 		}
 
 	} else {
 
 		if err = unix.SetsockoptInt(fileDescriptor, unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
 			unix.Close(fileDescriptor)
-			return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: IP_TRANSPARENT: %s", err)}
+			return PacketConn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("set socket option: IP_TRANSPARENT: %s", err)}
 		}
 
 	}
 
 	if err = unix.Bind(fileDescriptor, localSocketAddress); err != nil {
 		unix.Close(fileDescriptor)
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("socket bind: %s", err)}
+		return PacketConn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("socket bind: %s", err)}
 	}
 
 	if err = unix.Connect(fileDescriptor, remoteSocketAddress); err != nil {
 		unix.Close(fileDescriptor)
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("socket connect: %s", err)}
+		return PacketConn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("socket connect: %s", err)}
 	}
 
 	fdFile := os.NewFile(uintptr(fileDescriptor), fmt.Sprintf("net-udp-dial-%s", raddr.String()))
@@ -261,10 +261,10 @@ func DialUDP(network string, laddr *net.UDPAddr, raddr *net.UDPAddr) (*net.UDPCo
 	remoteConn, err := net.FileConn(fdFile)
 	if err != nil {
 		unix.Close(fileDescriptor)
-		return nil, &net.OpError{Op: "dial", Err: fmt.Errorf("convert file descriptor to connection: %s", err)}
+		return PacketConn{}, &net.OpError{Op: "dial", Err: fmt.Errorf("convert file descriptor to connection: %s", err)}
 	}
 
-	return remoteConn.(*net.UDPConn), nil
+	return PacketConn{remoteConn.(*net.UDPConn)}, nil
 }
 
 // udpAddToSockerAddr will convert a UDPAddr
